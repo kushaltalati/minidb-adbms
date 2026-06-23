@@ -65,15 +65,17 @@ shows a 100% hit ratio for a hot row.
 ### B. Index utilisation during query execution
 
 ```sql
-CREATE TABLE t (id INT PRIMARY KEY, payload TEXT);
-INSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c');
-EXPLAIN SELECT * FROM t WHERE id = 2;        -- IndexScan (uses the B+ tree)
-EXPLAIN SELECT * FROM t WHERE payload = 'b'; -- SeqScan  (no index on payload)
-CREATE INDEX idx_p ON t (payload);
-EXPLAIN SELECT * FROM t WHERE payload = 'b'; -- now IndexScan
+CREATE TABLE t (id INT PRIMARY KEY, cat INT, payload TEXT);
+INSERT INTO t VALUES (1,3,'a'),(2,3,'b'),(3,1,'c'),(4,2,'d'),(5,3,'e');
+CREATE INDEX idx_cat ON t (cat);
+EXPLAIN SELECT * FROM t WHERE cat = 3;       -- IndexScan: equality is selective enough
+EXPLAIN SELECT * FROM t WHERE cat > 1;       -- SeqScan:  a broad range, index not worth it
+EXPLAIN SELECT * FROM t WHERE payload = 'b'; -- SeqScan:  no index on payload
 ```
-This shows the optimizer choosing between table scan and index scan, and the
-effect of adding a secondary index.
+This shows the optimizer genuinely *choosing* between an index scan and a table
+scan on the **same** indexed column — it costs each path (full scan ≈ N vs
+index scan ≈ selectivity × N × random-access penalty) and only uses the index
+when it is cheaper. `EXPLAIN` prints both costs for the chosen index scan.
 
 ### C. JOIN execution and join-order choice
 

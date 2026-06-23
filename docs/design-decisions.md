@@ -100,10 +100,16 @@ localised change in `record/`.
 The optimizer uses textbook selectivity estimates (equality on a unique column ≈
 1 row, equality on a non-unique column ≈ 10%, a range ≈ 33%) and exact row counts
 (the primary index size). It makes two real decisions — index vs table scan, and
-join order/algorithm — which are exactly the ones the brief asks for. We did not
-implement histograms or dynamic-programming join enumeration; join ordering is a
-greedy "smallest relation first" heuristic. `EXPLAIN` exposes the choices so they
-can be inspected and discussed.
+join order/algorithm — which are exactly the ones the brief asks for. The
+index-vs-scan choice is genuinely cost-based: a full scan costs ≈ N while an
+index scan costs ≈ selectivity × N × 4 (a random-access penalty per matched RID),
+and the index is used only when it is cheaper. So a point lookup on a large table
+uses the index, but a broad range (sel ≈ 1/3, where 1/3 × N × 4 > N) or a lookup
+on a tiny table correctly falls back to a `SeqScan`. We did not implement
+histograms (which would let a *selective* range use the index) or
+dynamic-programming join enumeration; join ordering is a greedy "smallest
+relation first" heuristic. `EXPLAIN` exposes the costs and choices so they can be
+inspected and discussed.
 
 ## Catalog persistence: a plain text file
 

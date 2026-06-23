@@ -18,6 +18,15 @@ std::string alias_of(const std::string& table, const std::string& alias) {
     return alias.empty() ? table : alias;
 }
 
+// Cost model constant. A sequential scan reads N rows with cheap sequential
+// I/O; an index scan fetches ~selectivity*N rows but each match is a *random*
+// access (descend the tree, then chase a RID to its heap page). We weight each
+// indexed match by this penalty so the optimizer can decide an index is *not*
+// worth it when the predicate isn't selective enough. With this value a unique
+// point lookup and a non-unique equality favour the index, while a broad range
+// (sel ~= 1/3) or a tiny table favour a full scan -- a real cost-based choice.
+constexpr double kRandomAccessPenalty = 4.0;
+
 // Which relation does a column reference belong to? Returns index into `rels`.
 int resolve_relation(const std::vector<Relation>& rels, const ColumnRef& ref) {
     if (!ref.table.empty()) {
@@ -73,33 +82,46 @@ std::unique_ptr<Operator> build_scan(ExecContext* ctx, const Relation& rel,
         int col = schema.column_index(p.left.col);
         const IndexHandle* idx = rel.table->index_on(col);
 
-        std::optional<Value> lo, hi;
-        bool lo_inc = true, hi_inc = true;
-        switch (p.op) {
-            case CompOp::EQ: lo = p.right_value; hi = p.right_value; break;
-            case CompOp::GT: lo = p.right_value; lo_inc = false; break;
-            case CompOp::GE: lo = p.right_value; lo_inc = true; break;
-            case CompOp::LT: hi = p.right_value; hi_inc = false; break;
-            case CompOp::LE: hi = p.right_value; hi_inc = true; break;
-            default: break;
-        }
-
+        // Cost the two access paths and only use the index when it wins.
+        double n = static_cast<double>(rel.table->row_count());
         double sel = Optimizer::estimate_selectivity(p, rel.table);
-        std::ostringstream reason;
-        reason << (chosen_is_eq ? "point lookup" : "range scan") << " on "
-               << rel.table->name << "." << p.left.col
-               << (idx->unique ? " (unique)" : "")
-               << "  est_rows=" << (std::size_t)(sel * rel.table->row_count() + 0.5);
+        double index_cost = sel * n * kRandomAccessPenalty;
+        double seq_cost = n;
+        std::size_t est_rows = static_cast<std::size_t>(sel * n + 0.5);
+        if (est_rows == 0) est_rows = 1;  // never advertise 0 matching rows
 
-        std::vector<Predicate> residual;
-        for (std::size_t i = 0; i < filters.size(); ++i)
-            if (static_cast<int>(i) != chosen) residual.push_back(filters[i]);
+        if (index_cost < seq_cost) {
+            std::optional<Value> lo, hi;
+            bool lo_inc = true, hi_inc = true;
+            switch (p.op) {
+                case CompOp::EQ: lo = p.right_value; hi = p.right_value; break;
+                case CompOp::GT: lo = p.right_value; lo_inc = false; break;
+                case CompOp::GE: lo = p.right_value; lo_inc = true; break;
+                case CompOp::LT: hi = p.right_value; hi_inc = false; break;
+                case CompOp::LE: hi = p.right_value; hi_inc = true; break;
+                default: break;
+            }
 
-        std::unique_ptr<Operator> scan = std::make_unique<IndexScan>(
-            ctx, rel.table, rel.alias, idx, lo, lo_inc, hi, hi_inc,
-            reason.str());
-        if (residual.empty()) return scan;
-        return std::make_unique<Filter>(std::move(scan), residual);
+            std::ostringstream reason;
+            reason << (chosen_is_eq ? "point lookup" : "range scan") << " on "
+                   << rel.table->name << "." << p.left.col
+                   << (idx->unique ? " (unique)" : "")
+                   << "  est_rows=" << est_rows
+                   << "  [index_cost=" << index_cost
+                   << " < scan_cost=" << seq_cost << "]";
+
+            std::vector<Predicate> residual;
+            for (std::size_t i = 0; i < filters.size(); ++i)
+                if (static_cast<int>(i) != chosen) residual.push_back(filters[i]);
+
+            std::unique_ptr<Operator> scan = std::make_unique<IndexScan>(
+                ctx, rel.table, rel.alias, idx, lo, lo_inc, hi, hi_inc,
+                reason.str());
+            if (residual.empty()) return scan;
+            return std::make_unique<Filter>(std::move(scan), residual);
+        }
+        // Index exists but isn't selective enough -> a full scan is cheaper.
+        // Fall through to the SeqScan path below.
     }
 
     // No usable index: full table scan, with any filters applied on top.

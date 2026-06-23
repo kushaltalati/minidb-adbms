@@ -14,9 +14,25 @@ minidb> SELECT name, age FROM users WHERE age > 26;
 | alice | 30  |
 | carol | 40  |
 +-------+-----+
-minidb> EXPLAIN SELECT * FROM users WHERE id = 2;
--> IndexScan(users.users_pk)  point lookup on users.id (unique)  est_rows=1
+minidb> CREATE INDEX idx_age ON users (age);
+minidb> EXPLAIN SELECT * FROM users WHERE age = 30;   -- selective equality -> index
+-> IndexScan(users.idx_age)  point lookup on users.age  est_rows=1  [index_cost=1.2 < scan_cost=3]
+minidb> EXPLAIN SELECT * FROM users WHERE age > 26;   -- broad range -> the cost-based
+-> SeqScan(users)  est_rows=3                         --   optimizer picks a table scan
 ```
+
+---
+
+## Team
+
+**Team Name:** minions
+
+| Full Name | Roll Number | Scaler Email |
+|---|---|---|
+| Kushal Talati | 24BCS10123 | kushal.24bcs10123@sst.scaler.com |
+| Akshat Kushwaha | 24BCS10060 | akshat.24bcs10060@sst.scaler.com |
+| Aman Yadav | 24BCS10183 | aman.24bcs10183@sst.scaler.com |
+| Manasvi Sabbarwal | 24BCS10406 | manasvi.24bcs10406@sst.scaler.com |
 
 ---
 
@@ -115,9 +131,13 @@ consults the B+ tree indexes. Full walkthrough in
 
 ## 6. Optimizer
 
-- **Cost estimation** (`query/optimizer.h`) — exact row counts come from the
-  primary index size; access paths are costed as full-scan (≈ N rows) vs
-  index-scan (≈ selectivity × N).
+- **Cost estimation & access-path choice** (`query/optimizer.h`) — exact row
+  counts come from the primary index size. Each access path is costed: a **full
+  scan ≈ N** (sequential I/O) vs an **index scan ≈ selectivity × N × 4** (each
+  match is a random RID lookup, weighted by a random-access penalty). The
+  optimizer uses the index **only when its cost is lower**, otherwise it falls
+  back to a `SeqScan` — so a unique/selective equality uses the index while a
+  broad range or a tiny table is scanned. `EXPLAIN` prints both costs.
 - **Selectivity estimation** — equality on a unique/primary column ≈ 1 row,
   equality on a non-unique column ≈ 10%, a range ≈ 33%.
 - **Join ordering** — relations are ordered smallest-first (greedy) and each join
